@@ -1,0 +1,29 @@
+{
+  "loop_detection": {
+    "enabled": true,
+    "confidence_threshold": 0.8,
+    "window_size": 5,
+    "auto_pause": false,
+    "auto_snapshot": true,
+    "notification_level": "warning"
+  },
+  "resource_thresholds": {
+    "cpu_warning": 80.0,
+    "cpu_critical": 95.0,
+    "memory_warning": 80.0,
+    "memory_critical": 95.0,
+    "disk_warning": 90.0,
+    "disk_critical": 98.0
+  },
+  "monitoring": {
+    "sample_interval": 1.0,
+    "history_size": 300,
+    "alert_cooldown": 10.0,
+    "max_alerts_per_minute": 5
+  },
+  "automation": {
+    "enabled": false,
+    "max_concurrent_actions": 3,
+    "action_timeout": 30.0
+  }
+}

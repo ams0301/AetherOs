@@ -1,0 +1,103 @@
+#include "process_monitor.h"
+#include "loop_detector.h"
+#include "system_interceptor.h"
+#include <iostream>
+#include <thread>
+#include <chrono>
+#include <csignal>
+#include <atomic>
+#include <sstream>
+#include <iomanip>
+#include <fstream>
+#include <unistd.h>
+
+std::atomic<bool> running(true);
+
+void signalHandler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        running = false;
+        std::cout << "\nShutting down probe..." << std::endl;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    // Set up signal handler
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+    
+    std::cout << "Aether-OS Probe (Enhanced) starting..." << std::endl;
+    
+    // Initialize components
+    aetheros::probe::ProcessMonitor process_monitor;
+    aetheros::probe::LoopDetector loop_detector(15, 0.8, 3); // 15-sample window, 80% similarity, 3 matches for alert
+    aetheros::probe::SystemInterceptor interceptor;
+    
+    // Target PID to monitor (default to self for demo, or take from args)
+    pid_t target_pid = getpid();
+    if (argc > 1) {
+        target_pid = std::stoi(argv[1]);
+    }
+    
+    std::cout << "Monitoring process: " << target_pid << std::endl;
+    
+    // Initialize interceptor for target process
+    if (!interceptor.initialize(target_pid)) {
+        std::cerr << "Warning: Failed to initialize system interceptor (continuing in monitor-only mode)" << std::endl;
+        // Continue anyway - we can still monitor without interception
+    }
+    
+    // Main monitoring loop
+    size_t sample_count = 0;
+    while (running) {
+        // Get process information
+        aetheros::probe::ProcessInfo info = process_monitor.getProcessInfo(target_pid);
+        
+        // Create feature sample for loop detection
+        aetheros::probe::ProcessFeatures features;
+        features.cpu_usage = info.cpu_usage;
+        features.memory_mb = static_cast<double>(info.memory_usage) / 1024.0; // Convert KB to MB
+        features.disk_read_kb = static_cast<double>(info.disk_read);
+        features.disk_write_kb = static_cast<double>(info.disk_write);
+        features.timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+        
+        // Add sample to loop detector
+        loop_detector.addFeatureSample(features);
+        
+        // Periodic status output (every 10 samples)
+        sample_count++;
+        if (sample_count % 10 == 0) {
+            std::cout << "[" << std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) 
+                      << "] PID: " << info.pid 
+                      << " | CPU: " << std::fixed << std::setprecision(1) << info.cpu_usage << "%"
+                      << " | MEM: " << info.memory_usage << "KB"
+                      << " | Samples: " << sample_count;
+            
+            if (loop_detector.isLoopDetected()) {
+                std::cout << " | *** LOOP DETECTED ***";
+                std::cout << " | Confidence: " << std::fixed << std::setprecision(2) 
+                          << loop_detector.getLoopConfidence();
+                std::cout << " | Details: " << loop_detector.getLoopDetails();
+                
+                // In a real implementation, we would:
+                // 1. Notify auditor via ZMQ
+                // 2. Possibly pause the process for analysis
+                // 3. Trigger detailed investigation
+                
+                // For demo, we'll reset after detection to allow continued monitoring
+                loop_detector.reset();
+            }
+            std::cout << std::endl;
+        }
+        
+        // Sleep briefly to avoid excessive CPU usage
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    
+    // Cleanup
+    interceptor.cleanup();
+    std::cout << "Aether-OS Probe stopped." << std::endl;
+    
+    return 0;
+}

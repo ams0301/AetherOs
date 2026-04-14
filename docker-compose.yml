@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  probe:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: probe-builder
+    volumes:
+      - ./probe/src:/app/probe/src:ro
+      - ./probe/include:/app/probe/include:ro
+    ports:
+      - "5555:5555"  # ZMQ publisher port
+    command: >
+      sh -c "cd probe/build && 
+             ./aetheros-probe 1"  # Monitor PID 1 (init) as example
+    cap_add:
+      - SYS_PTRACE  # Needed for ptrace in probe
+    security_opt:
+      - seccomp:unconfined  # For ptrace (not ideal for production)
+    
+  auditor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: auditor-builder
+    volumes:
+      - ./auditor/src:/app/auditor/src:ro
+      - ./logs:/app/logs
+    environment:
+      - PYTHONPATH=/app
+    command: >
+      sh -c "cd auditor/src && 
+             python auditor.py --paths /app/logs"
+    depends_on:
+      - probe
+    
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: controller-builder
+    volumes:
+      - ./controller/src:/app/controller/src:ro
+      - ./snapshots:/app/snapshots
+      - ./configs:/app/configs
+    environment:
+      - PYTHONPATH=/app
+    ports:
+      - "8080:8080"  # For potential web interface
+    command: >
+      sh -c "cd controller/src && 
+             python controller.py"
+    depends_on:
+      - probe
+      - auditor
+
+# Alternative: Single service with all components (simpler for development)
+services:
+  aetheros-all:
+    build: .
+    volumes:
+      - ./probe/src:/app/probe/src:ro
+      - ./probe/include:/app/probe/include:ro
+      - ./auditor/src:/app/auditor/src:ro
+      - ./controller/src:/app/controller/src:ro
+      - ./logs:/app/logs
+      - ./snapshots:/app/snapshots
+      - ./configs:/app/configs
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    ports:
+      - "5555:5555"  # ZMQ
+      - "8080:8080"  # Controller UI
+    command: >
+      sh -c "echo 'Starting Aether-OS all-in-one...' && 
+             # Start probe in background
+             cd probe/build && ./aetheros-probe 1 & 
+             # Start auditor
+             cd auditor/src && python auditor.py --paths /app/logs & 
+             # Start controller (foreground)
+             cd controller/src && python controller.py"
