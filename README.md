@@ -41,30 +41,30 @@ Aether-OS provides comprehensive monitoring, analysis, and control capabilities 
 
 ## Core Features
 
-### 🔍 **Real-time Monitoring**
+###  **Real-time Monitoring**
 - Continuous process/resource monitoring (CPU, memory, disk I/O, network I/O)
 - Low-overhead design (<1% CPU impact)
 - Multi-process tracking including child processes
 
-### 🎯 **Intelligent Detection**
+###  **Intelligent Detection**
 - **Reasoning Loop Detection**: Multi-dimensional similarity analysis using exponential decay
 - **Anomaly Detection**: Machine learning-based (Isolation Forest) with feature normalization
 - **Pattern Recognition**: Identifies inefficient resource usage patterns
 - **Statistical Analysis**: Real-time trend analysis and deviation detection
 
-### ⚙️ **Active Control & Intervention**
+###  **Active Control & Intervention**
 - **Process Control**: SIGSTOP/SIGCONT/SIGTERM capabilities
 - **Resource Throttling**: Dynamic cgroups-based allocation (planned)
 - **Safe Experimentation**: Sandbox agent behavior without system-wide impact
 - **Manual Override**: Human-in-the-loop intervention capabilities
 
-### 💾 **Persistence & Audit**
+###  **Persistence & Audit**
 - **Audit Trail**: Comprehensive logging of all activities and decisions
 - **Historical Storage**: SQLite database for trend analysis and reporting
 - **Forensic Analysis**: Complete event reconstruction capability
 - **Compliance Reporting**: Generated reports for regulatory requirements
 
-### 🔗 **Seamless Integration**
+###  **Seamless Integration**
 - **ZeroMQ Communication**: High-performance inter-component messaging
 - **Fallback Mechanisms**: Graceful degradation when components unavailable
 - **Extensible Design**: Modular architecture for easy enhancement
@@ -106,7 +106,7 @@ Aether-OS provides comprehensive monitoring, analysis, and control capabilities 
 
 ## Core Features Detailed
 
-### 🔁 **Reasoning Loop Interceptor**
+###  **Reasoning Loop Interceptor**
 Instead of simple hash matching, Aether-OS uses multi-dimensional feature analysis:
 - **Features Monitored**: CPU usage, memory consumption, disk I/O patterns
 - **Similarity Measure**: Exponential decay based on Euclidean distance in normalized feature space
@@ -114,7 +114,7 @@ Instead of simple hash matching, Aether-OS uses multi-dimensional feature analys
 - **Confidence Scoring**: Based on average similarity of detected matches
 - **Adaptive Thresholds**: Configurable sensitivity for different use cases
 
-### 📊 **Advanced Anomaly Detection**
+###  **Advanced Anomaly Detection**
 The Auditor employs sophisticated machine learning:
 - **Model**: Isolation Forest for unsupervised anomaly detection
 - **Feature Normalization**: Running mean and standard deviation adaptation
@@ -122,7 +122,7 @@ The Auditor employs sophisticated machine learning:
 - **Temporal Awareness**: Considers historical context for accurate detection
 - **Continuous Learning**: Background model retraining with new data
 
-### 💾 **Persistent Audit Trail**
+###  **Persistent Audit Trail**
 All system activities are stored for analysis and compliance:
 - **Process Metrics**: CPU, memory, I/O readings with timestamps
 - **Loop Detections**: Confidence scores and behavioral details
@@ -130,7 +130,7 @@ All system activities are stored for analysis and compliance:
 - **Alerts**: Generated notifications with full context
 - **Indexed Queries**: Fast retrieval for reporting and analysis
 
-### 🎮 **Interactive Controller**
+###  **Interactive Controller**
 The Controller provides intuitive human oversight:
 - **Real-time Dashboard**: Live updating panels showing system status
 - **Process Tree Visualization**: Hierarchical view with resource metrics
@@ -363,23 +363,7 @@ The system identifies unusual resource consumption patterns:
 - **Visualization Enhancements**: Real-time charts and graphs
 - **Policy Engine**: Configurable rules for automatic responses
 
-## Support
 
-For issues, questions, or contributions:
-- **Issue Tracking**: Use GitHub Issues
-- **Documentation**: Refer to this README and `/docs/` directory
-- **Community**: Engage through project discussion forums
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Built with ❤️ using modern C++20 and Python practices
-- Inspired by systems monitoring and AI safety research
-- Thanks to the open-source community for foundational tools and libraries
-- Special thanks to contributors who helped shape this system
 
 ---
 
