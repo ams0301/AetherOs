@@ -99,6 +99,78 @@ class AuditViewer:
         finally:
             conn.close()
     
+    def insert_process_metrics(self, timestamp: float, pid: int, command: str, 
+                               cpu_usage: float, memory_usage: int, 
+                               disk_read: int, disk_write: int,
+                               net_sent: int = 0, net_recv: int = 0,
+                               status: str = "running") -> bool:
+        """Insert process metrics into the database"""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO process_metrics 
+                (timestamp, pid, command, cpu_usage, memory_usage, disk_read, disk_write, net_sent, net_recv, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (timestamp, pid, command, cpu_usage, memory_usage, disk_read, disk_write, net_sent, net_recv, status))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to insert process metrics: {e}")
+            return False
+    
+    def insert_alert(self, timestamp: float, alert_type: str, confidence: float, 
+                     pid: int, details: str) -> bool:
+        """Insert alert into the database"""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO alerts (timestamp, alert_type, confidence, pid, details)
+                VALUES (?, ?, ?, ?, ?)
+            """, (timestamp, alert_type, confidence, pid, details))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to insert alert: {e}")
+            return False
+    
+    def insert_loop_detection(self, timestamp: float, pid: int, confidence: float,
+                              cpu_usage: float, memory_usage: int, similar_samples: int) -> bool:
+        """Insert loop detection into the database"""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO loop_detections (timestamp, pid, confidence, cpu_usage, memory_usage, similar_samples)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (timestamp, pid, confidence, cpu_usage, memory_usage, similar_samples))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to insert loop detection: {e}")
+            return False
+    
+    def insert_system_event(self, timestamp: float, event_type: str, source: str,
+                            description: str, severity: str = "info") -> bool:
+        """Insert system event into the database"""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO system_events (timestamp, event_type, source, description, severity)
+                VALUES (?, ?, ?, ?, ?)
+            """, (timestamp, event_type, source, description, severity))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to insert system event: {e}")
+            return False
+    
     def get_process_metrics(self, 
                            start_time: Optional[float] = None,
                            end_time: Optional[float] = None,

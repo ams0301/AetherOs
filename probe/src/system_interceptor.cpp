@@ -29,35 +29,13 @@ bool SystemInterceptor::initialize(pid_t target_pid) {
         return false;
     }
     
-    // Attach to the process using ptrace
-    if (ptrace(PTRACE_ATTACH, target_pid_, nullptr, nullptr) == -1) {
-        std::cerr << "Error: Failed to attach to process " << target_pid_ 
-                  << ": " << strerror(errno) << std::endl;
-        return false;
-    }
-    
-    // Wait for the process to stop
-    int status;
-    if (waitpid(target_pid_, &status, 0) == -1) {
-        std::cerr << "Error: Failed to wait for process " << target_pid_ << std::endl;
-        ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr);
-        return false;
-    }
-    
-    // Check if process stopped due to our attach
-    if (!WIFSTOPPED(status)) {
-        std::cerr << "Error: Process " << target_pid_ << " did not stop as expected" << std::endl;
-        ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr);
-        return false;
-    }
-    
-    // Start the interception thread
+    // Start the interception thread - it will handle PTRACE_ATTACH and all ptrace calls
     running_ = true;
     enabled_ = true;
     active_ = true;
     interceptor_thread_ = std::thread(&SystemInterceptor::interceptorThread, this);
     
-    std::cout << "SystemInterceptor initialized and attached to PID " << target_pid_ << std::endl;
+    std::cout << "SystemInterceptor initialized for PID " << target_pid_ << std::endl;
     return true;
 }
 
@@ -135,6 +113,33 @@ void SystemInterceptor::getSyscallArguments(pid_t pid, long* args) const {
 void SystemInterceptor::interceptorThread() {
     std::cout << "Interceptor thread started for PID " << target_pid_ << std::endl;
     
+    // Attach to the process using ptrace (must be done on this thread)
+    if (ptrace(PTRACE_ATTACH, target_pid_, nullptr, nullptr) == -1) {
+        std::cerr << "Error: Failed to attach to process " << target_pid_ 
+                  << ": " << strerror(errno) << std::endl;
+        active_ = false;
+        return;
+    }
+    
+    // Wait for the process to stop
+    int status;
+    if (waitpid(target_pid_, &status, 0) == -1) {
+        std::cerr << "Error: Failed to wait for process " << target_pid_ << std::endl;
+        ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr);
+        active_ = false;
+        return;
+    }
+    
+    // Check if process stopped due to our attach
+    if (!WIFSTOPPED(status)) {
+        std::cerr << "Error: Process " << target_pid_ << " did not stop as expected" << std::endl;
+        ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr);
+        active_ = false;
+        return;
+    }
+    
+    std::cout << "SystemInterceptor attached to PID " << target_pid_ << std::endl;
+    
     while (running_) {
         try {
             // Continue the process to execute one instruction
@@ -150,7 +155,6 @@ void SystemInterceptor::interceptorThread() {
             }
             
             // Wait for the process to stop (either entering or exiting syscall)
-            int status;
             if (waitpid(target_pid_, &status, 0) == -1) {
                 if (errno == EINTR) {
                     continue; // Interrupted by signal, try again

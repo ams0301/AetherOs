@@ -128,9 +128,15 @@ ProcessInfo ProcessMonitor::getProcessInfo(pid_t pid) {
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - prev_info.last_check).count();
             if (duration > 0) {
                 // Calculate CPU usage percentage
+                // CPU% = (CPU_time_diff_seconds / wall_time_diff_seconds) * 100
+                // CPU_time_diff_seconds = time_diff / clock_ticks_
+                // wall_time_diff_seconds = duration / 1000
+                // CPU% = (time_diff / clock_ticks_) / (duration / 1000) * 100
+                //     = (time_diff * 1000 * 100) / (clock_ticks_ * duration)
+                //     = (time_diff * 100000) / (clock_ticks_ * duration)
                 long long time_diff = total_time - prev_info.last_cpu_time;
-                double cpu_usage = (static_cast<double>(time_diff) / static_cast<double>(duration)) * 
-                                  (static_cast<double>(clock_ticks_) / 10.0) * 100.0;
+                double cpu_usage = (static_cast<double>(time_diff) * 100000.0) / 
+                                  (static_cast<double>(clock_ticks_) * static_cast<double>(duration));
                 info.cpu_usage = std::max(0.0, std::min(100.0, cpu_usage)); // Clamp to 0-100%
             }
             
@@ -148,11 +154,12 @@ ProcessInfo ProcessMonitor::getProcessInfo(pid_t pid) {
     std::string statm_path = "/proc/" + std::to_string(pid) + "/statm";
     std::ifstream statm_file(statm_path);
     if (statm_file.is_open()) {
-        long long resident;
-        if (statm_file >> resident) {
-            // resident is in pages, convert to KB
+        long long size_pages, resident_pages;
+        // statm format: size resident shared text lib data dt
+        if (statm_file >> size_pages >> resident_pages) {
+            // resident_pages is the RSS in pages, convert to KB
             long page_size = sysconf(_SC_PAGESIZE);
-            info.memory_usage = (resident * page_size) / 1024;
+            info.memory_usage = (resident_pages * page_size) / 1024;
         }
         statm_file.close();
     }
@@ -186,6 +193,9 @@ ProcessInfo ProcessMonitor::getProcessInfo(pid_t pid) {
     // For now, keeping as 0 (would require more complex implementation)
     info.net_rx = 0;
     info.net_tx = 0;
+    
+    // Update the cache with the current info for next iteration
+    process_cache_[pid] = info;
     
     return info;
 }

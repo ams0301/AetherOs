@@ -69,7 +69,7 @@ bool ZmqCommunicator::initialize() {
         publisher_->set(zmq::sockopt::linger, linger);
         
         int sndhwm = 1000; // Set high water mark for send buffer
-        publisher_->set(zmq::sockopt::send_high_water_mark, sndhwm);
+        publisher_->set(zmq::sockopt::sndhwm, sndhwm);
         
         initialized_ = true;
         active_ = true;

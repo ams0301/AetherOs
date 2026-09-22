@@ -91,17 +91,9 @@ class SnapshotManager:
             with open(data_file, 'w') as f:
                 json.dump(snapshot_data, f, indent=2)
             
-            # Try to create a core dump if possible (requires permissions)
-            try:
-                core_file = snapshot_path / "core.dump"
-                # Note: Actual core dumping requires gdb or similar and proper permissions
-                # This is a placeholder for the concept
-                with open(core_file, 'w') as f:
-                    f.write(f"# Core dump placeholder for PID {pid}\n")
-                    f.write(f"# Generated at {timestamp}\n")
-                    f.write(f"# In a real implementation, this would contain actual process memory\n")
-            except Exception as e:
-                logger.warning(f"Could not create core dump: {e}")
+            # Note: Actual core dumping requires gdb or similar and proper permissions
+            # This snapshot captures process state for manual restoration
+            # A real core dump would require: gdb -p <pid> -ex "generate-core-file" -batch
             
             # Create archive
             archive_path = self.snapshot_dir / f"{snapshot_id}.tar.gz"
@@ -222,14 +214,16 @@ class SnapshotManager:
     
     def restore_snapshot(self, snapshot_id: str, target_pid: Optional[int] = None) -> bool:
         """
-        Restore a snapshot (conceptual - actual restoration requires ptrace/gdb)
+        Extract and display snapshot information for manual restoration.
+        Actual process state restoration requires external tools (gdb, criu, etc.)
+        and is not implemented in this version.
         
         Args:
             snapshot_id: ID of snapshot to restore
-            target_pid: Optional target PID to restore into (if None, creates new process)
+            target_pid: Optional target PID (not used in current implementation)
             
         Returns:
-            True if successful, False otherwise
+            True if snapshot data was successfully extracted, False otherwise
         """
         try:
             if snapshot_id not in self.metadata:
@@ -254,37 +248,28 @@ class SnapshotManager:
                 with open(data_file, 'r') as f:
                     snapshot_data = json.load(f)
                 
-                logger.info(f"Restored snapshot {snapshot_id} for PID {snapshot_data['pid']}")
-                logger.info(f"Original command: {' '.join(snapshot_data['cmdline'])}")
-                logger.info(f"Snapshot created: {snapshot_data['timestamp']}")
+                logger.info(f"Extracted snapshot {snapshot_id} for PID {snapshot_data['pid']}")
                 
-                # In a real implementation, we would:
-                # 1. Use ptrace to attach to target process (or create new one)
-                # 2. Restore memory map from snapshot
-                # 3. Restore registers and CPU state
-                # 4. Resume process execution
-                #
-                # For now, we provide the information for manual restoration
-                print(f"\n=== SNAPSHOT RESTORATION INFO ===")
-                print(f"Snapshot ID: {snapshot_id}")
+                # Display restoration information
+                print(f"\n=== SNAPSHOT {snapshot_id} - RESTORATION GUIDE ===")
                 print(f"Original PID: {snapshot_data['pid']}")
                 print(f"Command: {' '.join(snapshot_data['cmdline'])}")
                 print(f"Working Directory: {snapshot_data['cwd']}")
-                print(f"Environment Variables: {len(snapshot_data['environ'])} variables")
+                print(f"Environment Variables: {len(snapshot_data['environ'])} captured")
                 print(f"Open Files: {len(snapshot_data['open_files'])} files")
                 print(f"Memory Regions: {len(snapshot_data['memory_map'])} regions")
                 print(f"Network Connections: {len(snapshot_data['connections'])} connections")
-                print(f"To manually restore, you would need to:")
-                print(f"  1. Start process: {' '.join(snapshot_data['cmdline'])}")
+                print(f"\nTo restore this process state, you would need to:")
+                print(f"  1. Start the process: {' '.join(snapshot_data['cmdline'])}")
                 print(f"  2. Set working directory: {snapshot_data['cwd']}")
-                print(f"  3. Apply environment variables")
-                print(f"  4. Use debugger to restore memory state")
-                print(f"===============================\n")
+                print(f"  3. Apply environment variables from snapshot")
+                print(f"  4. Use external tools (gdb, CRIU) for full memory/state restoration")
+                print(f"=============================================\n")
                 
                 return True
                 
         except Exception as e:
-            logger.error(f"Failed to restore snapshot {snapshot_id}: {e}")
+            logger.error(f"Failed to extract snapshot {snapshot_id}: {e}")
             return False
     
     def delete_snapshot(self, snapshot_id: str) -> bool:
