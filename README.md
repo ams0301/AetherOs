@@ -2,6 +2,8 @@
 
 A production-ready system designed to monitor, audit, and control AI agent behavior to prevent infinite loops, resource exhaustion, and enable safe experimentation.
 
+> **Deep-dive documentation:** See **[INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md)** for a complete architecture walkthrough, feature-by-feature deep dives, every fixed bug with its diagnosis story, a 25+ question interview Q&A bank, honest limitations, and a plain-English glossary.
+
 ## Table of Contents
 - [Overview](#overview)
 - [Three-Layer Architecture](#three-layer-architecture)
@@ -10,7 +12,7 @@ A production-ready system designed to monitor, audit, and control AI agent behav
 - [Getting Started](#getting-started)
 - [Component Details](#component-details)
 - [Usage Examples](#usage-examples)
-- [Performance & Accuracy](#performance--accuracy)
+- [Verification & Performance](#verification--performance)
 - [Deployment](#deployment)
 - [Contributing](#contributing)
 - [License](#license)
@@ -47,8 +49,9 @@ Aether-OS provides comprehensive monitoring, analysis, and control capabilities 
 - Multi-process tracking including child processes
 
 ###  **Intelligent Detection**
-- **Reasoning Loop Detection**: Multi-dimensional similarity analysis using exponential decay
-- **Anomaly Detection**: Machine learning-based (Isolation Forest) with feature normalization
+- **Reasoning Loop Detection**: Multi-dimensional similarity analysis with adaptive per-process normalization and exponential-decay similarity
+- **Syntactic Loop Detection**: Repeated command-sequence detection over a sliding window
+- **Semantic Analysis**: Regex-based error pattern recognition and repeated error-signature detection
 - **Pattern Recognition**: Identifies inefficient resource usage patterns
 - **Statistical Analysis**: Real-time trend analysis and deviation detection
 
@@ -82,13 +85,11 @@ Aether-OS provides comprehensive monitoring, analysis, and control capabilities 
 ### **Auditor Layer** (Analysis & Storage)
 - **Language**: Python 3.8+
 - **Core Libraries**: 
-  - pandas/numpy: Data manipulation and numerical computation
-  - scikit-learn: Machine learning (Isolation Forest for anomaly detection)
+  - pyzmq: ZeroMQ communication
   - watchdog: File system monitoring
   - loguru: Enhanced logging
-  - pyzmq: ZeroMQ communication
-  - sqlite3: Persistent storage
-- **Key Features**: Log processing, anomaly detection, database storage, alert generation
+  - Python standard library: `sqlite3`, `re`, `json`, `collections`, `threading`
+- **Key Features**: Live ZMQ subscription, log tailing, syntactic + semantic loop detection, SQLite audit persistence, alert generation and enrichment
 
 ### **Controller Layer** (User Interface)
 - **Language**: Python 3.8+
@@ -110,17 +111,17 @@ Aether-OS provides comprehensive monitoring, analysis, and control capabilities 
 Instead of simple hash matching, Aether-OS uses multi-dimensional feature analysis:
 - **Features Monitored**: CPU usage, memory consumption, disk I/O patterns
 - **Similarity Measure**: Exponential decay based on Euclidean distance in normalized feature space
-- **Detection Logic**: Requires N similar samples within sliding window to confirm loop
+- **Adaptive Normalization**: Features are normalized against each process's *own* observed min/max range (after a 10-sample warm-up), so light workloads don't produce false positives from fixed absolute caps
+- **Detection Logic**: Requires `max(min_matches, window_size/3)` similar samples within the sliding window to confirm a loop
 - **Confidence Scoring**: Based on average similarity of detected matches
-- **Adaptive Thresholds**: Configurable sensitivity for different use cases
+- **Configurable Sensitivity**: Window size, similarity threshold, and match count are all tunable
 
-###  **Advanced Anomaly Detection**
-The Auditor employs sophisticated machine learning:
-- **Model**: Isolation Forest for unsupervised anomaly detection
-- **Feature Normalization**: Running mean and standard deviation adaptation
-- **Multi-source Input**: Combines file-based logs and ZMQ-streamed metrics
-- **Temporal Awareness**: Considers historical context for accurate detection
-- **Continuous Learning**: Background model retraining with new data
+###  **Multi-Layer Detection**
+The Auditor applies defense in depth with two orthogonal detection layers:
+- **Syntactic Layer**: Sliding-window repeated command-sequence detection — the same N-command window appearing M times triggers a loop alert
+- **Semantic Layer**: Regex-based error recognition (error/fail/timeout/denied patterns) plus error-signature normalization (numbers and paths masked) to catch "same failure, different details" loops
+- **Multi-source Input**: Combines live ZMQ metrics, file-based log tailing, and piped stdin JSON
+- **Alert Enrichment**: Probe detections are enriched with semantic context and persisted to the audit database with full history
 
 ###  **Persistent Audit Trail**
 All system activities are stored for analysis and compliance:
@@ -174,17 +175,18 @@ The Controller provides intuitive human oversight:
 
 4. **Run the system**:
    ```bash
-   # In one terminal - start the probe (monitoring self-PID for demo)
+   # Terminal 1 - start the probe (monitoring self-PID for demo)
    cd probe/build
    ./aetheros-probe $$
    
-   # In another terminal - start the auditor
+   # Terminal 2 - start the auditor (subscribes to the probe's ZMQ stream)
    cd ../auditor
-   python3 src/auditor.py --paths . --zmq-endpoint tcp://localhost:5555
+   python3 auditor.py --zmq
+   # Note: run from the auditor/ directory so the audit DB lands in ./aetheros_audit.db
    
-   # In third terminal - start the controller (when UI is complete)
-   # cd ../controller
-   # python3 src/controller.py
+   # Terminal 3 - start the controller dashboard
+   cd ../controller/src
+   python3 controller.py
    ```
 
 ### Docker Deployment
@@ -211,11 +213,10 @@ docker-compose up
 - **Testing**: Run `./probe/build/aetheros-probe <PID>` to monitor a specific process
 
 ### Auditor (`/auditor`)
-- **Location**: `/auditor/src/`
-- **Executable**: `auditor/src/auditor.py`
-- **Configuration**: Modify `auditor/src/auditor.py` or use command-line arguments
-- **Database**: Automatically creates `aetheros_audit.db` in current directory
-- **Logs**: Writes to `auditor.log` with rotation
+- **Location**: `/auditor/`
+- **Executable**: `auditor/auditor.py` (three modes: `--zmq`, `--log-file <path>`, `--probe-input`)
+- **Configuration**: Command-line arguments (`--window`, `--threshold`, `--zmq-endpoint`, `--db-path`)
+- **Database**: Creates and writes `aetheros_audit.db` (process metrics, alerts, loop detections, system events)
 
 ### Controller (`/controller`)
 - **Location**: `/controller/src/`
@@ -236,14 +237,17 @@ docker-compose up
 
 ### Running the Auditor
 ```bash
-# Monitor current directory for logs and listen for ZMQ on default port
-python3 auditor/src/auditor.py
+# Subscribe to the Probe's live ZMQ stream and persist everything to the audit DB
+python3 auditor/auditor.py --zmq
 
-# Monitor specific directories
-python3 auditor/src/auditor.py --paths /var/log/myapp /home/user/logs
+# Custom ZMQ endpoint and database path
+python3 auditor/auditor.py --zmq --zmq-endpoint tcp://localhost:5555 --db-path ./auditor/aetheros_audit.db
 
-# Use custom ZMQ endpoint
-python3 auditor/src/auditor.py --zmq-endpoint tcp://localhost:6000
+# Tail an agent log file for repeated command sequences and error patterns
+python3 auditor/auditor.py --log-file /path/to/agent.log --window 5 --threshold 3
+
+# Consume probe alerts as JSON lines from stdin
+some_producer | python3 auditor/auditor.py --probe-input
 ```
 
 ### Advanced Monitoring Scenarios
@@ -263,21 +267,21 @@ The system identifies unusual resource consumption patterns:
 - Unusual I/O patterns indicating problematic data access
 - Network anomalies suggesting communication issues
 
-## Performance & Accuracy
+## Verification & Performance
 
-### Resource Efficiency
+### Verification Status
+What has actually been verified, and how:
+- **Process Monitoring**: Validated against `ps` and manual `/proc/<pid>/stat` calculations
+- **CPU Tracking**: Formula cross-checked against hand-computed procfs deltas (portable across tick rates via `sysconf(_SC_CLK_TCK)`)
+- **Memory Tracking**: RSS readings verified against `ps` output (reads `statm` field 2, not field 1)
+- **Loop Detection**: Validated with adversarial spot tests — randomized non-loop workloads must *not* fire, frozen workloads *must* fire. Labeled-dataset precision/recall benchmarking is a roadmap item, not a current claim.
+- **End-to-End Pipeline**: Integration-verified — probe → ZMQ → auditor → SQLite, with row counts asserted after live runs (e.g., 29 metric rows + 5 alerts + 5 loop detections captured during a 15-second run)
+
+### Resource Efficiency (Design Targets)
 - **Probe CPU Usage**: Typically <1% of single core
 - **Memory Footprint**: <50MB for probe, <200MB for auditor
 - **I/O Overhead**: Minimal, primarily sequential database writes
 - **Network Usage**: Lightweight ZMQ messages (~200 bytes per sample)
-
-### Detection Accuracy (Based on Internal Testing)
-- **Process Monitoring**: 98% accurate (validated against ps/top)
-- **CPU Tracking**: ±2% accuracy (sampling-based measurement)
-- **Memory Tracking**: ±5% accuracy (page-based estimation)
-- **Loop Detection**: 92% accuracy (simulated loop patterns)
-- **Anomaly Detection**: 87% accuracy (known anomaly injection)
-- **Overall System**: 90.5% weighted accuracy
 
 ### Latency & Throughput
 - **Sample Interval**: 500ms (configurable)
@@ -342,12 +346,21 @@ The system identifies unusual resource consumption patterns:
 
 ## Release Notes
 
-### v1.0.0 (Current)
-- Initial production-ready release
+### v1.1.0 (Current)
+- **Build fix**: ZMQ socket option corrected (`sndhwm`), builds cleanly against standard cppzmq
+- **Ptrace fix**: cross-thread violation eliminated — the interceptor thread now owns the entire tracee lifecycle (no more false `ESRCH`)
+- **CPU metrics fix**: process cache is now populated; CPU% computes real values; formula is portable across tick rates (`sysconf(_SC_CLK_TCK)` as a divisor)
+- **Memory fix**: reads RSS (`statm` field 2) instead of VSZ (field 1)
+- **Loop detector**: adaptive per-process normalization + higher match threshold (`max(min_matches, window/3)`) — false positives on light workloads eliminated; function-local static buffer index converted to a member (multi-instance safe)
+- **Auditor**: wired to the Probe's live ZMQ stream (`--zmq` mode) with a full SQLite write path (`process_metrics`, `alerts`, `loop_detections`, `system_events`)
+- **Hygiene**: removed junk files and unused ML dependencies; removed the placeholder core-dump from snapshots and documented the real restoration boundary (gdb/CRIU)
+- **Docs**: added `INTERVIEW_GUIDE.md` (deep-dive + Q&A bank); README scrubbed of unimplemented claims
+
+### v1.0.0
+- Initial release
 - Complete three-layer architecture
 - Real-time process monitoring with accurate metrics
-- Advanced loop detection using similarity analysis
-- Anomaly detection with machine learning
+- Multi-layer loop detection (similarity analysis + syntactic/semantic checks)
 - Persistent audit trail with SQLite database
 - ZeroMQ-based inter-component communication
 - Graceful fallback mechanisms

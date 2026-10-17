@@ -340,15 +340,16 @@ print("TEST_LOGGER_END")
             
             # Start auditor
             print("Starting auditor...")
+            repo_root = os.path.dirname(os.path.abspath(__file__))
             auditor_cmd = [
-                sys.executable, 'auditor/src/auditor.py',
-                '--paths', '.',
+                sys.executable, os.path.join(repo_root, 'auditor', 'auditor.py'),
+                '--zmq',
                 '--zmq-endpoint', 'tcp://localhost:5555'
             ]
-            
+
             auditor_proc = subprocess.Popen(
                 auditor_cmd,
-                cwd='/home/pc/.openclaw/workspace/aether-os',
+                cwd=os.path.join(repo_root, 'auditor'),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True

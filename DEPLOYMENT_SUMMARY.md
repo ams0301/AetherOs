@@ -13,8 +13,8 @@ After comprehensive enhancement, the Aether-OS system now delivers **all origina
 - Low-latency ZMQ communication between components
 
 ### 2. **INTELLIGENT DETECTION** (Enhanced)
-- **Reasoning Loop Detection**: Multi-dimensional similarity analysis with exponential decay
-- **Anomaly Detection**: Machine learning (Isolation Forest) with feature normalization
+- **Reasoning Loop Detection**: Multi-dimensional similarity analysis with exponential decay and adaptive normalization
+- **Multi-Layer Detection**: Syntactic (repeated command sequences) plus semantic (repeated error patterns)
 - **Pattern Recognition**: Identifies inefficient resource usage patterns
 - **Statistical Analysis**: Real-time trend analysis and deviation detection
 - **Policy-Based Evaluation**: Smart mapping of detections to recommended actions
@@ -75,7 +75,7 @@ cd aether-os/probe/build
 ### Terminal 2: Start Auditor
 ```bash
 cd aether-os/auditor
-python3 src/auditor.py --paths . --zmq-endpoint tcp://localhost:5555
+python3 auditor.py --zmq
 ```
 
 ### Terminal 3: Start Enhanced Controller

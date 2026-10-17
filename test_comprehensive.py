@@ -72,7 +72,7 @@ def test_basic_functionality():
     print("\\n3. Testing Auditor Component:")
     auditor_files = [
         "./auditor/requirements.txt",
-        "./auditor/src/auditor.py"
+        "./auditor/auditor.py"
     ]
     
     auditor_ok = True

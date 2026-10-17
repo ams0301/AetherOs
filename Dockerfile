@@ -35,8 +35,8 @@ WORKDIR /app
 COPY auditor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy auditor source
-COPY auditor/src/ ./auditor/src/
+# Copy auditor source (entry point is auditor/auditor.py)
+COPY auditor/ ./auditor/
 
 # ======================
 # BUILD STAGE FOR CONTROLLER

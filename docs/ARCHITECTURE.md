@@ -39,7 +39,7 @@ Aether-OS is a production-ready three-layer system designed to monitor, audit, a
 **Technology**: Python 3.8+
 **Responsibilities**:
 - Multi-source log collection (file system monitoring + ZMQ subscription)
-- Advanced anomaly detection using Isolation Forest with feature normalization
+- Multi-layer loop detection: syntactic (repeated command sequences) and semantic (repeated error patterns)
 - Persistent storage of metrics, events, and alerts in SQLite database
 - Intelligent alert generation with confidence thresholds
 - Background model retraining for continuous improvement
@@ -100,7 +100,7 @@ All messages follow this structure:
 1. Auditor subscribes to probe metrics via ZMQ
 2. Collects logs from file system monitoring
 3. Extracts features from both sources for analysis
-4. Applies Isolation Forest anomaly detection with normalization
+4. Applies syntactic and semantic loop detection (repeated command windows, repeated error signatures)
 5. Stores all data in SQLite database for persistence
 6. Generates alerts when confidence thresholds exceeded
 7. Provides historical data for trend analysis
@@ -180,7 +180,7 @@ All messages follow this structure:
 - **Log Collection**: Watchdog-based file system monitoring
 - **ZMQ Subscription**: Background thread with message dispatching
 - **Feature Extraction**: JSON parsing and key-value pattern matching
-- **Anomaly Detection**: Isolation Forest with running normalization
+- **Detection**: Syntactic (repeated-state counting) plus semantic (regex error signatures) loop detection
 - **Database Layer**: SQLite with indexed tables for performance
 - **Alert Generation**: Threshold-based with deduplication and rate limiting
 

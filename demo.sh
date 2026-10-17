@@ -2,21 +2,21 @@
 echo 'Starting Aether-OS demonstration...'
 
 # Start probe monitoring self PID
-cd probe/build && ./aetheros-probe 3246 &
-PROBE_PID=
+cd probe/build && ./aetheros-probe $$ &
+PROBE_PID=$!
 
-# Start auditor
-cd ../auditor && python3 src/auditor.py --paths . --zmq-endpoint tcp://localhost:5555 &
-AUDITOR_PID=
+# Start auditor (subscribes to the probe's ZMQ stream)
+cd ../auditor && python3 auditor.py --zmq &
+AUDITOR_PID=$!
 
 # Start controller
-cd ../controller && python3 src/controller.py &
-CONTROLLER_PID=
+cd ../controller/src && python3 controller.py &
+CONTROLLER_PID=$!
 
 echo 'All components started!'
-echo 'Probe PID: '
-echo 'Auditor PID: '
-echo 'Controller PID: '
+echo "Probe PID: $PROBE_PID"
+echo "Auditor PID: $AUDITOR_PID"
+echo "Controller PID: $CONTROLLER_PID"
 
 echo 'Press Ctrl+C to stop all components'
 wait

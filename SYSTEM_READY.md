@@ -15,8 +15,8 @@ After comprehensive development and enhancement, the Aether-OS system is now **F
   - Works without elevated privileges (monitor-only mode when needed)
 
 ### 🧠 INTELLIGENT DETECTION
-- Multi-dimensional loop detection with exponential decay similarity
-- Anomaly detection using Isolation Forest machine learning
+- Multi-dimensional loop detection with exponential decay similarity and adaptive normalization
+- Syntactic loop detection (repeated command sequences) and semantic analysis (repeated error patterns)
 - Pattern recognition for inefficient resource usage
 - Real-time trend analysis and deviation detection
 
@@ -94,7 +94,7 @@ cd aether-os/probe/build
 ### Terminal 2: Start Analysis & Storage
 ```bash
 cd aether-os/auditor
-python3 src/auditor.py --paths . --zmq-endpoint tcp://localhost:5555
+python3 auditor.py --zmq
 ```
 
 ### Terminal 3: Start Complete Control Interface

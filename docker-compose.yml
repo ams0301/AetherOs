@@ -30,8 +30,8 @@ services:
     environment:
       - PYTHONPATH=/app
     command: >
-      sh -c "cd auditor/src && 
-             python auditor.py --paths /app/logs"
+      sh -c "cd auditor &&
+             python auditor.py --zmq --db-path /app/logs/aetheros_audit.db"
     depends_on:
       - probe
     
@@ -79,6 +79,6 @@ services:
              # Start probe in background
              cd probe/build && ./aetheros-probe 1 & 
              # Start auditor
-             cd auditor/src && python auditor.py --paths /app/logs & 
+             cd auditor && python auditor.py --zmq & 
              # Start controller (foreground)
              cd controller/src && python controller.py"

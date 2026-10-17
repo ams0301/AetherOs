@@ -16,11 +16,11 @@ This document summarizes the enhancements made to transform Aether-OS from a bas
 
 ### 2. AUDITOR LAYER (Python)
 **Status**: ✅ FUNCTIONAL
-- Dependencies: pandas, numpy, scikit-learn, watchdog, loguru, pyzmq
+- Dependencies: pyzmq, watchdog, loguru (plus Python stdlib: sqlite3, re, json)
 - Semantic analysis for loop detection
-- SQLite-based audit trail storage
-- Log file monitoring and ZMQ message processing
-- Anomaly detection capabilities
+- SQLite-based audit trail storage (full write path: metrics, alerts, loop detections, system events)
+- Log file monitoring and live ZMQ stream processing
+- Syntactic + semantic loop detection
 
 ### 3. CONTROLLER LAYER (Python TUI)
 **Status**: ✅ COMPLETELY REIMPLEMENTED WITH ALL FEATURES
@@ -153,7 +153,7 @@ cd aether-os/probe/build
 
 # Terminal 2: Start auditor
 cd aether-os/auditor
-python3 src/auditor.py --paths . --zmq-endpoint tcp://localhost:5555
+python3 auditor.py --zmq
 
 # Terminal 3: Start enhanced controller
 cd aether-os/controller
