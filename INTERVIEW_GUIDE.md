@@ -30,9 +30,9 @@
 >
 > My system, Aether-OS, solves this with three components. The **Probe** is written in C++20 because it reads process data directly from the Linux `/proc` filesystem every 500 milliseconds — CPU time, memory, disk I/O — and runs a sliding-window similarity algorithm to detect when a process's behavior becomes repetitive, which is the signature of a loop. The **Auditor** is a Python service that subscribes to the Probe's live ZeroMQ stream, applies a second layer of analysis — including semantic checks like 'are the last N log lines all errors?' — and writes everything into a SQLite audit database. The **Controller** is a terminal-based dashboard where a human can see live metrics, browse the audit trail, manage policies, take snapshots, and send pause/resume/terminate signals to any process.
 >
-> The interesting engineering problems were at the systems level. For example, the syscall interception uses `ptrace`, and Linux requires that *all* ptrace calls on a tracee come from the same thread — a bug in the original code attached on the main thread but polled from a worker thread, causing false 'process no longer exists' errors. I found and fixed that, along with a CPU calculation formula that only worked by coincidence on 100Hz x86 systems, a cache that was never populated so CPU always read 0%, and a loop detector whose fixed normalization constants made it fire false positives on nearly every light workload — I made normalization adaptive per-process instead.
+> The interesting engineering problems were at the systems level. For example, the syscall interception uses `ptrace`, and Linux requires that *all* ptrace calls on a tracee come from the same thread — a bug in the original code attached on the main thread but polled from a worker thread, causing false 'process no longer exists' errors. I found and fixed that, along with a CPU calculation formula that only worked by coincidence on 100Hz x86 systems, and a cache that was never populated so CPU always read 0%. The loop detector is my favorite post-mortem: it fired false positives on nearly every light workload, and the original diagnosis blamed the normalization constants — but a whiteboard check of the threshold math (in a normalized feature space, the *minimum possible similarity* is exp(−0.2) ≈ 0.82, already above the 0.8 alert threshold, so the threshold could never reject anything) exposed that the normalization was never wired into the similarity path at all. Dead code — the detector had been comparing raw mixed-unit values all along. The real fix: measure distance in per-dimension noise-floor units (5% CPU, 4MB memory, 512KB I/O rate), feed the detector per-sample I/O *rates* instead of cumulative counters, gate alerts on actual resource consumption so idle processes can't fire, and require evidence on two consecutive samples.
 >
-> End result: a working end-to-end pipeline — probe detects, auditor records, controller displays — verified by integration tests where I watched real metrics flow through ZMQ into the database."
+> End result: a working end-to-end pipeline — probe detects, auditor records, controller displays — verified by a 12-case adversarial test harness (spins, jitter, periodic patterns, drift, and the original randomized-workload false-positive repro) plus an end-to-end run where a CPU-pinned process is detected at the mathematically predicted cadence — every 7 samples — and every alert lands in SQLite."
 
 ---
 
@@ -190,9 +190,9 @@ Every message on the wire is a tiny JSON object:
    - Opens `/proc/<pid>/statm`, reads field 2 (resident pages) → memory in KB.
    - Opens `/proc/<pid>/io`, reads `rchar:`/`wchar:` → cumulative disk I/O in KB.
    - Stores this sample in the cache for the next diff.
-3. The sample is fed to the **LoopDetector** as a 4-dimensional feature vector (CPU, memory-MB, disk-read, disk-write). The detector keeps a circular window of the last 15 samples and asks: "how similar is the new sample to each of the previous ones?"
-4. Similarity is computed on **normalized** features (so CPU% and disk-KB are comparable), using Euclidean distance + exponential decay: `similarity = exp(-distance/scale)`.
-5. If enough previous samples are "similar enough" (≥ the match threshold), a **loop detection** is raised with a confidence score (the average similarity of the matches). The probe prints it, publishes it on ZMQ, and resets its window.
+3. The sample is fed to the **LoopDetector** as a 4-dimensional feature vector: CPU%, memory MB, and per-sample disk read/write *rates* (deltas of the cumulative counters — a constant-rate I/O loop must look flat). The detector keeps a circular window of the last 15 samples and asks: "how similar is the new sample to each of the previous ones?"
+4. Similarity: each dimension's difference is divided by its **noise-floor deadband** (CPU 5%, memory 4MB, disk 512KB), the result combined as Euclidean distance in deadband units, then `similarity = exp(-distance)`. Identical samples score 1.0; a 6% CPU move alone scores ~0.30. Threshold 0.8 means "all dimensions within ~22% of one deadband" — reachable and discriminating from both sides.
+5. A **loop detection** is raised only when: the window shows real activity (avg CPU ≥ 5% or any I/O — an idle process matching itself isn't a harmful loop), at least `max(3, window/3)` = 5 stored samples match, **and** the previous sample also met that bar (consecutive confirmation — Poisson spikes are independent, real loops persist). Confidence is the average similarity of the matches. The probe prints it, publishes it on ZMQ, and resets its window, so each alert re-accumulates evidence from scratch.
 6. Regardless of detection, the probe **publishes every metric sample** on ZMQ (type `"0"`).
 7. The **Auditor**, running `auditor.py --zmq`, receives the message on its SUB socket in a background thread:
    - Type `"0"` → INSERT a row into the `process_metrics` table (SQLite).
@@ -255,28 +255,39 @@ Derivation, which you should be able to do on a whiteboard:
 
 **The intuition**: A process stuck in a tight loop has a *flat, repetitive* resource fingerprint — same CPU, same memory, same I/O pattern, sample after sample. A healthy process's metrics wander. So: keep a window of recent samples, and if a new sample is "similar" to many previous ones, suspect a loop.
 
-**The data**: Each sample is a `ProcessFeatures` vector: `{cpu_usage, memory_mb, disk_read_kb, disk_write_kb, timestamp}`. The window is a **circular buffer** of 15 samples (default constructor in `main.cpp` uses `LoopDetector(15, 0.8, 3)`).
+**The data**: Each sample is a `ProcessFeatures` vector: `{cpu_usage, memory_mb, disk_read_kb, disk_write_kb, timestamp}`. Disk fields hold **per-sample rates** (the delta of `/proc/<pid>/io`'s cumulative counters between samples — computed in `main.cpp`), because a constant-rate I/O loop must look flat; cumulative counters would make any I/O-active process diverge from its own window forever. The window is a **circular buffer** of 15 samples (default constructor in `main.cpp` uses `LoopDetector(15, 0.8, 3)`).
 
-**Step 1 — Normalization (adaptive, after my fix)**: Raw features live on wildly different scales (CPU is 0–100, memory can be 0–several-GB). To compare them in one Euclidean space, each is squashed to 0–1. The original code divided by fixed maximums (100% CPU / 8GB memory / 100MB I/O) — and this caused the false-positive plague (Part 5, bug #4). Now:
+**Step 1 — Deadband scaling**: Raw features live on wildly different scales (CPU is 0–100, memory in MB, I/O rate in KB). Instead of mixing raw units, each dimension's difference is divided by a **noise-floor deadband** — the smallest change in that resource that is behaviorally meaningful:
 
-- The detector tracks **observed min and max** for each feature across samples.
-- After 10 warm-up samples, normalization uses the *observed range* for **this process**: `(value − observed_min) / (observed_max − observed_min)`.
-- Below 10 samples (or when a feature's range is degenerate), fall back to fixed maximums.
+| Dimension | Deadband | Rationale |
+|---|---|---|
+| CPU | 5.0 % | sub-5% wobble is scheduling noise |
+| Memory | 4.0 MB | sub-4MB movement is allocator noise |
+| Disk rate | 512.0 KB/sample | ~1 MB/s — below that, I/O is incidental |
 
-**Why this matters in one sentence**: A tiny Python script that uses 30MB of RAM and 0.1% CPU would previously look identical, sample after sample, because dividing by 8GB flattened its memory differences to ~0.004 in normalized space — "similar" by construction. Now that its own range is 29.9–30.1MB, a 0.2MB wobble is *visible*.
+Distance is then measured *in deadband units*. This is the third draft of this design, and the first two are instructive: the original code mixed raw units (so the biggest-scale dimension dominated); a later attempt normalized by each process's *observed min/max range* — but that amplifies noise (a spin loop's ±0.5% CPU jitter expands to the full [0,1] range and stops matching itself) and was never wired in anyway (Part 5, bug #9). Fixed deadbands give a *meaningful* scale per dimension without amplifying noise.
 
-**Step 2 — Similarity**: Euclidean distance over the four normalized features, converted to a 0–1 similarity via exponential decay:
+**Step 2 — Similarity**: Euclidean distance in deadband units, converted to similarity by exponential decay:
 
 ```
-distance   = √( (cpu₁−cpu₂)² + (mem₁−mem₂)² + (dr₁−dr₂)² + (dw₁−dw₂)² )   [normalized space]
-similarity = exp(−distance / scale)          [scale = 10.0]
+distance   = √( (Δcpu/5)² + (Δmem/4)² + (Δdr/512)² + (Δdw/512)² )   [deadband units]
+similarity = exp(−distance)                                          [scale = 1.0]
 ```
 
-Exponential decay is a smooth, cheap kernel: distance 0 → similarity 1.0; large distance → similarity decays fast but never exactly 0. `scale=10` means samples need to be *quite* close to pass the 0.8 threshold (similarity 0.8 ↔ distance ≈ 2.2 in normalized space).
+**Do the whiteboard check this design exists because of**: with raw or fixed-cap-normalized features in [0,1], max distance is √4 = 2, so min similarity is exp(−2) = 0.135 with scale 1 — but with scale 10 it would be exp(−0.2) ≈ 0.82, *above* the 0.8 threshold: the threshold would never reject anything and detection would fire purely on window fill. In deadband units the distance is **unbounded** (Δ/τ can be arbitrarily large), so similarity spans (0, 1] and 0.8 sits strictly inside: identical samples → 1.0 (pass); a 6% CPU move alone → distance 1.2 → similarity ≈ 0.30 (fail). Reachable from both sides — the test of a sound threshold.
 
-**Step 3 — Decision**: For the incoming sample, count how many stored window entries have similarity ≥ threshold (0.8). If `matches ≥ max(min_matches_for_alert, window_size/3)` → loop detected. My fix raised the effective bar to `window/3` (= 5 of 15) so one noisy spike can't fire it. Confidence = average similarity across the matched entries (so a *tight* loop reads 0.95+; a sloppy one reads 0.82).
+**Step 3 — Decision (three gates, all required)**:
+1. **Activity gate**: avg CPU over valid window samples ≥ 5% *or* any disk rate > 0. An idle process matching itself isn't a harmful loop — it's just idle. This single gate kills the entire "fires on every light workload" false-positive class.
+2. **Match bar**: `matches ≥ max(min_matches_for_alert, window_size/3)` = 5 of 15. One noisy spike can't fire it.
+3. **Consecutive confirmation**: the previous sample must *also* have met gates 1–2. Random near-duplicate spikes are independent sample-to-sample (~2% each with the old design); real loops persist. Requiring two consecutive samples squares that away.
 
-**On detection**: The probe logs it, publishes it (message type `"1"`), and calls `reset()` — clearing the window and the adaptive stats — so each alert represents a *fresh* accumulation of evidence rather than spamming every 500ms forever.
+Confidence = average similarity across the matched entries (a tight spin reads 0.95+; a sloppy drift-loop reads 0.85).
+
+**Detection cadence (derived, then verified)**: for a genuinely repetitive active process, matches reach 5 on the 6th sample after any reset, but confirmation needs the 7th → first alert at sample 7, then every 7 samples (~3.5s at 500ms). The E2E run against a CPU-pinned spinner produced detections at samples 7, 14, 21 — exactly as derived. This cadence is *earned* by evidence accumulation, unlike the old code's identical-looking every-6 cadence, which fired on threshold-vacuity.
+
+**What it detects** (all verified by `probe/tests/test_loop_detector.cpp`): pinned-CPU spins, spins with sub-deadband jitter, period-2 patterns (same-phase samples match), slow drift (≤ ~0.9MB/sample stays within deadband across the window), constant-rate I/O loops. **What it rejects**: idle/near-idle (gated), light randomized work (the original false-positive repro), heavy randomized work, random I/O rates, fast drift, and period ≥ 3 (only ⌊14/3⌋ = 4 same-phase samples exist in a 15-window — below the 5 bar; longer-period loops are the auditor's syntactic layer's job). 
+
+**On detection**: The probe logs it, publishes it (message type `"1"`), and calls `reset()` — clearing the window and the confirmation flag — so each alert represents a *fresh* accumulation of evidence rather than spamming every 500ms forever.
 
 **The circular buffer index bug**: The buffer position was a *function-local static* `static size_t pos = 0` — meaning **all instances shared one position**. Fine with one detector, silently corrupt with two. Fixed by making it a member `pos_` (and fixing `setWindowSize()` and `reset()` to reset it consistently).
 
@@ -422,11 +433,9 @@ Each of these is a complete story with **symptom → diagnosis → fix → verif
 ## Bug #4 — Loop detector false positives on ordinary processes
 
 - **Symptom**: A process doing **genuinely randomized** CPU work with randomized sleeps — definitively *not* looping — triggers `LOOP DETECTED` at 0.88–0.94 confidence almost immediately.
-- **Diagnosis**: Normalization divided every feature by **fixed maximums** — CPU/100, memory/8192MB, disk/102400KB. For a small process, memory and disk live near zero, so 3 of 4 normalized features are flat ~0.00x regardless of behavior. With 3 of 4 dimensions effectively frozen, even jittery CPU samples were "similar enough" (≥0.8) against the 3-match rule. The detector was measuring *its own normalization artifacts*, not the process.
-- **Fix (two-part)**:
-  1. **Adaptive per-process normalization** — track observed min/max per feature; after a 10-sample warm-up, normalize by `(value − min) / (max − min)` over the *process's own* observed range. Now a 0.2MB wobble in a 30MB process is visible instead of crushed to 0.004.
-  2. **Higher match bar** — require `max(min_matches, window_size/3)` matches (5 of 15 by default), so detection demands broad agreement across the window, not a lucky few.
-- **Honest residual**: a process whose metrics are *truly* flat (an idle `sleep`) still matches itself — the detector flags genuinely-frozen states. That is arguably by design ("no behavioral change for N samples"), but say it out loud as a known tuning trade-off; it shows you understand the detector's semantics, not just its code.
+- **Original diagnosis (partly wrong — see bug #9)**: fixed-maximum normalization crushing light workloads. The *complete* diagnosis took three rounds; the final fix is in bug #9 below. The behavioral pieces that were genuinely wrong and fixed here: the match bar (3 → `max(3, window/3)`) and the function-local static index (bug #5).
+- **What actually fired, mechanically**: the detector compared **raw mixed-unit features** (CPU% mixed with MB mixed with KB) with `exp(-distance/10)` — similarity ≥ 0.8 meant "within ~2.23 combined raw units." Any light process (CPU < 2%, flat memory, no I/O) sits inside that tolerance by construction; the detector then fired purely on window fill — every 6 samples, forever. The 0.88–0.94 "confidence" was just the average similarity of trivially-matching flat samples.
+- **Honest residual after the full fix**: near-idle processes are now suppressed by the activity gate (bug #9) — an idle process matching itself is not a harmful loop. What remains honest to say: a *resource-active* process whose only varying dimension wobbles inside its deadband can still match (e.g., pure CPU work bouncing within ±5%); multi-dimensional variety disambiguates, and the auditor's semantic layer is the backstop.
 
 ## Bug #5 — `static size_t pos`: hidden shared state across instances
 
@@ -456,8 +465,24 @@ Each of these is a complete story with **symptom → diagnosis → fix → verif
   1. The probe serialized type as a **string** (`"type":"0"`); the auditor compared with **integer** equality (`msg_type == 0`). `"0" == 0` is false; every message fell through.
   2. `json.loads` on the outer message had already parsed `payload` into a **dict**; the auditor called `json.loads(payload)` again → TypeError, swallowed by a broad except → silent drop.
 - **Fix**: coerce the type (`int(msg_type_raw)` with try/except) and branch on `isinstance(payload, str)` before parsing. **Then I found the broad `except` that hid defect 2 and made failures log loudly instead.**
-- **Verification**: the same 15-second run now yields 29 metrics + 5 alerts + 5 loop-detections in SQLite.
+- **Verification**: the same 15-second run now yields 29 metrics + 5 alerts + 5 loop-detections in SQLite. (Historical note: those 5 loop detections came from monitoring an idle shell — exactly the false-positive class bug #9 later suppressed. The numbers were real; the *semantics* were wrong, and the fix changed the demo target from an idle shell to a CPU-pinned spinner.)
 - **Lesson**: two bugs *composed* into silence. And: a broad except that doesn't log is a bug factory — fail loudly in the debug path.
+
+## Bug #9 — The whiteboard check that exposed my own dead code
+
+*This is the best story in the project — a mathematical review of my own fix found the fix didn't exist.*
+
+- **The trigger**: a pre-interview review asked one question: *"if every normalized feature is in [0,1], the four-dimensional distance between any two samples is at most √4 = 2. With `exp(−d/10)`, the minimum possible similarity is `exp(−0.2) ≈ 0.82` — already above your 0.8 threshold. Is your threshold mathematically reachable?"*
+- **Working the claim against the guide as written**: correct. In a normalized [0,1]⁴ space with scale 10, similarity never drops below 0.82, the 0.8 threshold never rejects anything, detection fires purely on window fill — and my own integration data confirmed it: 5 detections in ~30 samples is exactly one per 6, the window-refill cadence (detect at 6, reset, 12, 18, 24, 30).
+- **Reading the actual code**: something worse. `addFeatureSample` called `calculateSimilarity(stored_raw, new_raw)` — and `normalizeFeatures()` was **never called anywhere**. Dead code. The "adaptive normalization fix" documented in bug #4 had never been wired into the similarity path; the only behavioral change from that fix session was the match bar 3→5, which *delayed* false positives by two samples without preventing any. The code had been running raw mixed-unit similarity all along, where 0.8 happened to be reachable — but "similar" meant "within ~2.23 raw units," so light workloads sat inside tolerance by construction.
+- **Why the obvious fix (wire the normalization in) was wrong**: I worked it both ways before touching code. Full-range adaptive normalization *breaks the flagship true positive* — a spin loop at 99±0.5% CPU has its tiny, harmless jitter expanded to the entire [0,1] range, so it stops matching itself. It also makes single-dimension-varying processes *more* permissive (any wobble fills the range, and normalized coincidences match ~40% of pairs in 1-D). And a second E2E run against a disk-streaming process exposed the same unit-imbalance flaw *between* dimensions: cumulative I/O counters grow ~5,000,000 KB per sample, so no I/O-active process could ever match its own window.
+- **The real fix (four parts)**:
+  1. **Per-dimension deadbands** — divide each feature's difference by a noise floor (CPU 5%, memory 4MB, disk rate 512KB) and measure distance in deadband units with `exp(−distance)`. Unbounded above ⇒ similarity spans (0, 1] ⇒ threshold 0.8 is reachable *and* discriminating (identical → 1.0; 6% CPU move alone → ~0.30).
+  2. **Rates, not totals** — feed the detector per-sample I/O deltas so a constant-rate I/O loop looks flat (cumulative counters made I/O loops structurally undetectable).
+  3. **Activity gate** — alert only if the window shows avg CPU ≥ 5% or any I/O. An idle process matching itself isn't a harmful loop; this kills the entire light-workload false-positive class.
+  4. **Consecutive confirmation** — the previous sample must also have carried full evidence. Random near-duplicate spikes are independent (~2% each); loops persist. Squared probability kills the residual.
+- **Verification**: a 12-case labeled harness (`probe/tests/test_loop_detector.cpp`): spins, jitter, period-2, slow drift, and constant-rate I/O loops all detected (first at sample 7, then every 7 — the *derived* cadence); idle, light-random (the original FP repro), heavy-random, active-band-random, fast drift, random I/O, and period-3 all rejected. Then end-to-end: a CPU-pinned spinner fired at samples 7/14/21 with all alerts persisted to SQLite.
+- **Lessons to quote**: (1) *"A design that isn't wired in is indistinguishable from a design that doesn't exist — verify the data path, not the intent."* (2) *"Do the threshold math on the whiteboard: min/max of the kernel over the actual feature space tells you whether your threshold can ever say no."* (3) *"I removed my own wrong fix" — replacing dead normalization with deadbands + gating was less code, not more.*
 
 ## Hygiene fixes (mention briefly, don't dwell)
 
@@ -475,10 +500,10 @@ Each of these is a complete story with **symptom → diagnosis → fix → verif
 > "It's a safety net for autonomous AI agents: a C++ probe watches their OS-level resource behavior and detects infinite/repetitive loops, a Python auditor analyzes and persists everything to an audit database, and a Python controller gives humans a live dashboard to intervene."
 
 **Q: What was the hardest part?**
-> "The loop detector's false positives. The detection *idea* — similarity across a sliding window — was fine, but fixed normalization constants meant light workloads looked flat in 3 of 4 dimensions and everything tripped the threshold. Diagnosing that required realizing the detector was measuring its own normalization artifacts, not the process. The fix — adaptive per-process normalization based on observed ranges — is simple to state, but only fell out of understanding exactly which dimension was frozen."
+> "The loop detector's false positives — and specifically, being wrong about my own fix. The detection *idea* — similarity across a sliding window — was fine, and my first diagnosis blamed the normalization constants. But a whiteboard check of the threshold math ('if features are normalized to [0,1], the minimum possible similarity is exp(−0.2) ≈ 0.82 — already above your 0.8 threshold') forced me back into the code, where I found the normalization had never been wired into the similarity path at all. Dead code. The detector had been comparing raw mixed-unit values all along, and 'similar' meant 'within ~2.2 raw units' — which light workloads satisfy by construction. The real fix — per-dimension noise-floor deadbands, I/O rates instead of cumulative counters, an activity gate, and consecutive-sample confirmation — was *less* code than the fake fix, and every claim in it is now backed by a 12-case labeled test harness."
 
 **Q: What would you do differently?**
-> "Three things: (1) formal tests — I'd add gtest for the probe and pytest for the auditor from day one instead of integration scripts; (2) I'd separate 'channel' from 'state' for metrics — publish CPU/IO deltas rather than cumulative counters; (3) I'd put the loop detector's similarity parameters behind a config with a tuning harness so adjusting sensitivity is data-driven instead of hand-waved."
+> "Three things: (1) formal tests from day one — the adversarial harness I eventually built is exactly what should have existed before the first tuning claim; (2) publish I/O *rates* rather than cumulative counters everywhere — the cumulative-counter trap bit the detector's feature vector too; (3) do the kernel math up front: for any threshold+kernel design, compute the min/max attainable similarity over the actual feature space before believing the threshold means anything. That check is now literally a test case."
 
 **Q: Is this production-ready?**
 > "The monitoring and audit pipeline is. The ptrace interception needs a privilege model (containers need SYS_PTRACE), the loop detector's thresholds need per-workload tuning, and the Docker path isn't CI-verified. As a demo-interview project, the honest framing is: the core pipeline works end-to-end and is verified; the edges are documented as edges."
@@ -498,7 +523,7 @@ Each of these is a complete story with **symptom → diagnosis → fix → verif
 > "VSZ is total virtual address space — everything mapped, including reserved-but-never-touched memory. RSS is resident set — pages actually in physical RAM. They differ by gigabytes for processes that map big files or reserve arenas. Our memory bug was reading statm field 1 (VSZ) instead of field 2 (RSS) — a 12GB reading on a 430MB process. For loop detection we care about RSS because behavioral change shows up in what's actually being touched."
 
 **Q: Why does the probe use a 500ms sampling interval?**
-> "Fast enough to catch loops within a couple of windows (the detector needs ~15 samples ≈ 7.5s of evidence), slow enough that monitoring costs well under 1% of a core. It's a deliberate resolution/overhead trade — and it's configurable in the policy layer."
+> "Fast enough to accumulate the detector's evidence quickly — a clean repetitive pattern fires its first alert at sample 7, about 3.5 seconds — and slow enough that monitoring costs well under 1% of a core. It's a deliberate resolution/overhead trade — and it's configurable in the policy layer."
 
 ## C. Architecture & design questions
 
@@ -520,16 +545,16 @@ Each of these is a complete story with **symptom → diagnosis → fix → verif
 ## D. Detection algorithm questions
 
 **Q: Explain your loop-detection algorithm from scratch.**
-> "Every 500ms the probe builds a 4-dimensional feature vector: CPU%, memory in MB, disk read KB, disk write KB. It keeps the last 15 in a circular window. Each new sample is normalized — dividing by fixed caps initially, then, after a 10-sample warm-up, by the min/max range the process itself has exhibited — so all dimensions are 0–1 and comparable. For each stored sample, compute Euclidean distance to the new one, convert to similarity with exponential decay, `exp(-distance/10)`. Count stored samples with similarity ≥ 0.8; if that count reaches max(3, window/3) = 5, declare a loop with confidence = the average similarity of the matches, publish it, and reset the window so the next alert re-accumulates evidence."
+> "Every 500ms the probe builds a 4-dimensional feature vector: CPU%, memory in MB, and per-sample disk read/write *rates* — deltas of the cumulative /proc counters, because a constant-rate I/O loop must look flat. It keeps the last 15 in a circular window. For each stored sample, compute the difference per dimension, divide each by its noise-floor deadband — 5% CPU, 4MB memory, 512KB of I/O — combine as Euclidean distance in deadband units, and convert to similarity with exp(−distance). A similarity of 0.8 means every dimension agrees to within about a fifth of its deadband. Then three gates must all pass: the window is *active* (avg CPU ≥ 5% or any I/O — idle isn't a harmful loop), at least max(3, window/3) = 5 stored samples match, and the previous sample met the same bar — consecutive confirmation, because random near-duplicate spikes are independent but loops persist. Confidence is the average similarity of the matches. On alert, the window resets so every alert re-accumulates evidence; a genuinely repetitive active process therefore fires on a predictable cadence — first at sample 7, then every 7 — which is exactly what the end-to-end run shows."
 
 **Q: Why exponential decay for similarity?**
-> "It's a smooth, monotonic kernel from distance to similarity: identical → 1.0, diverging → decays fast but never exactly zero, so a distant sample can still contribute weak evidence rather than a hard cutoff. It's also one exp() call — negligible cost at this window size. Alternatives: a hard threshold on distance (no gradient, worse confidence scoring) or cosine similarity (measures direction, wrong for magnitudes — we care that values repeat, not that they point the same way)."
+> "It's a smooth, monotonic kernel from distance to similarity: identical → 1.0, diverging → decays fast but never exactly zero, so a distant sample can still contribute weak evidence rather than a hard cutoff. It's also one exp() call — negligible cost at this window size. Alternatives: a hard threshold on distance (no gradient, worse confidence scoring) or cosine similarity (measures direction, wrong for magnitudes — we care that values repeat, not that they point the same way). One caution from this project: the kernel only means something if the distance scale is unbounded. With features squashed into a unit cube and a scale of 10, the minimum attainable similarity is exp(−0.2) ≈ 0.82 — a 0.8 threshold can never reject anything. Deadband units keep distance unbounded, so the threshold actually discriminates: identical → 1.0, a 6% CPU move alone → ~0.30."
 
 **Q: What are the failure modes of this detector?**
-> "Three, in honesty: (1) a truly flat process — an idle sleep — matches itself and fires; arguably correct ('no behavioral change'), but if it's noise for your workload, you add an activity gate (ignore detection when CPU < X%). (2) A loop with *wandering* metrics — e.g., a loop that allocates each iteration — evades similarity; that's why the auditor's error-signature layer exists as a second, orthogonal check. (3) Warm-up: the first 10 samples use fixed normalization, so a process that's repetitive from second zero may take a few seconds to fire."
+> "Four, in honesty: (1) near-idle processes are *suppressed* by the activity gate — that's a deliberate semantic choice: an idle process matching itself isn't a harmful loop. If you wanted idle-hang detection, that's a different alert class. (2) A loop with *wandering* metrics — e.g., a loop that allocates faster than ~0.9MB/sample — evades similarity; that's why the auditor's error-signature layer exists as a second, orthogonal check. (3) Period-3-or-longer patterns: only ⌊14/3⌋ = 4 same-phase samples exist in a 15-window, below the 5 bar — longer-period loops are the auditor's syntactic layer's job (5-command window × 3 repeats). (4) A resource-active process whose *only* varying dimension wobbles inside its deadband can still match — multi-dimensional variety disambiguates, and the semantic layer is the backstop."
 
 **Q: How did you validate the detector?**
-> "Two adversarial cases: a genuinely randomized workload (random CPU bursts + random sleeps) that previously fired at 0.88–0.94 confidence should NOT fire after the adaptive fix; and a deliberately frozen process should still fire. I also cross-checked reported CPU% against a manual /proc stat calculation. The honest caveat: no labeled dataset and no precision/recall numbers — that's a stated next step, not a claim."
+> "A 12-case labeled harness feeds synthetic feature series directly into the detector: pinned-CPU spins, spins with sub-deadband jitter, period-2 patterns, slow drift, and constant-rate I/O loops must all fire (and at the derived cadence — first alert at sample 7); idle, light randomized work (the original false-positive repro), heavy randomized work, randomized work inside the active band, fast drift, random I/O rates, and period-3 patterns must all stay silent. Then end-to-end: a real CPU-pinned spinner fired at samples 7, 14, 21 with every alert persisted to SQLite. The honest caveat: it's synthetic labeling, not a large real-workload corpus — the harness makes the claims reproducible, and a bigger corpus remains a roadmap item."
 
 ## E. Language / implementation questions
 
@@ -567,16 +592,17 @@ If you claim a project is flawless, one question can sink you. These are the rea
 
 | # | Limitation | The honest line to say | Mitigation if asked |
 |---|---|---|---|
-| 1 | **Truly idle processes still "loop-detect"** | "A process with genuinely frozen metrics matches itself — the detector fires on 'no behavioral change,' which is arguably its definition of a loop but can be noise for idle daemons." | Add an activity gate: suppress detection when CPU and I/O deltas are both zero for the window. |
-| 2 | **No labeled-dataset validation of the detector** | "I validated with adversarial spot tests — randomized non-loops and frozen loops — not with a labeled corpus producing precision/recall. That's the next step, not a claim I make." | Build the tuning harness; report precision/recall per workload. |
+| 1 | ~~Truly idle processes still "loop-detect"~~ **RESOLVED** | "Was the top limitation — fixed with the activity gate (bug #9): alerts require avg CPU ≥ 5% or I/O in the window. Idle self-matching is suppressed by design; if you wanted idle-*hang* alerts, that's a separate alert class." | Already shipped and covered by harness cases 1 and 4. |
+| 2 | **Detector validation is synthetic, not a corpus** | "There is a 12-case labeled adversarial harness (spins, jitter, periodic patterns, drift, the original FP repro) plus end-to-end verification — but not a large real-workload corpus with precision/recall curves. That's the next step, not a claim I make." | Grow the harness into a labeled corpus; report precision/recall per workload. |
 | 3 | **Snapshot restore is informational** | "File/workspace snapshots restore fully; *process* snapshots capture a complete forensic record, but memory/register restoration requires CRIU or gdb — and I removed the placeholder that implied otherwise." | CRIU integration is the roadmap item. |
 | 4 | **Docker path unverified** | "The Dockerfile is a reasonable multi-stage build, but it isn't CI-verified — I flag that rather than claim it works." | Add a GitHub Actions job that builds the image. |
-| 5 | **No formal unit-test framework** | "Testing is integration-script-based: end-to-end runs asserting DB row counts. Real unit tests are the top roadmap item." | gtest for LoopDetector math (pure functions — ideal unit-test targets), pytest for auditor. |
+| 5 | **No formal unit-test framework in CI** | "The detector has a compiled adversarial harness and there are integration scripts asserting DB row counts — but no gtest/pytest wired into CI. Real CI is the top roadmap item." | gtest for the probe's math, pytest for the auditor, GitHub Actions on push. |
 | 6 | **Network metrics are hardcoded zero** | "Per-process network accounting needs eBPF or netlink correlation; I scoped it out rather than shipping a fake number." | eBPF layer is the roadmap item. |
 | 7 | **Single probe design** | "One probe watches one PID per process. The components are already decoupled so many-probe fan-in works; I just haven't exercised it." | Multi-probe integration test. |
 | 8 | **ptrace needs privileges** | "Inside unprivileged containers or WSL, attach returns EPERM — the probe degrades to monitor-only by design, but full interception requires SYS_PTRACE." | Document the capability requirement; that's what the graceful-degradation path is for. |
 | 9 | **Audit DB has a single writer** | "SQLite with per-insert connections — correct for 1 auditor, a bottleneck at 1000 machines." | Queue + batching, then Postgres. |
 | 10 | **No auth on the ZMQ channel** | "ZMQ has none built in. Fine for localhost; cross-machine it needs SSH tunnels or CurveZMQ encryption." | CurveZMQ or tunneling. |
+| 11 | **Period ≥ 3 loops and fast drift escape the similarity layer** | "A 15-sample window holds at most ⌊14/3⌋ = 4 same-phase samples of a period-3 pattern — below the 5-match bar — and drift faster than ~0.9MB/sample outruns the deadband horizon. Both are the auditor's syntactic/semantic layers' job; defense in depth." | Raise window size, or add autocorrelation-based detection for longer periods. |
 
 **The meta-line that ties this section together:**
 > "Every one of these is a scoped decision with a known mitigation path — the difference between a project that's unfinished and one that's honest about its edges."
@@ -595,11 +621,13 @@ If you claim a project is flawless, one question can sink you. These are the rea
 | Parameter | Value |
 |---|---|
 | Sample interval | 500 ms |
-| Loop window | 15 samples (≈ 7.5 s of evidence) |
-| Similarity threshold | 0.8 |
-| Matches to alert | max(3, window/3) = **5** |
-| Adaptive warm-up | 10 samples |
-| Similarity kernel | `exp(−distance / 10)` |
+| Loop window | 15 samples |
+| Similarity threshold | 0.8 (⇔ distance ≤ 0.223 deadband units) |
+| Matches to alert | max(3, window/3) = **5**, on **two consecutive samples** |
+| Activity gate | avg CPU ≥ **5%** or any I/O rate > 0 |
+| Deadbands | CPU **5%** / memory **4MB** / disk rate **512KB** per sample |
+| Similarity kernel | `exp(−distance)` in deadband units |
+| Detection cadence | first alert sample **7**, then every **7** while pattern persists |
 | Heartbeat | every 30 s |
 | ZMQ sndhwm | 1000 messages, linger = 0 |
 | Message size | ~200 bytes |
@@ -609,8 +637,10 @@ If you claim a project is flawless, one question can sink you. These are the rea
 ```
 CPU%   = (Δticks × 100000) / (CLK_TCK × Δms)
 RSS_KB = statm_field2 × PAGE_SIZE / 1024
-similarity = exp(−EuclideanDistance(normalized features) / 10)
-adaptive norm = (value − observed_min) / (observed_max − observed_min)
+io_rate_kb = current cumulative − previous cumulative   (per 500ms sample)
+distance = √( (Δcpu/5)² + (Δmem/4)² + (Δdr/512)² + (Δdw/512)² )   [deadband units]
+similarity = exp(−distance)
+threshold check: similarity ≥ 0.8 ⇔ all dims within ~22% of one deadband
 ```
 
 ## procfs field map
@@ -624,15 +654,16 @@ adaptive norm = (value − observed_min) / (observed_max − observed_min)
 ## Signals used
 `SIGSTOP` = pause · `SIGCONT` = resume · `SIGTERM` = terminate · `SIGINT/SIGTERM` = probe shutdown
 
-## The 8 bugs in 8 words each
+## The 9 bugs in 8 words each
 1. sndhwm, not send_high_water_mark
 2. ptrace: one thread owns the tracee
 3. Cache written, finally
-4. Normalize by observed range, not fixed max
+4. Light work matched: raw-unit tolerance (see 9)
 5. static → member (`pos_`)
 6. Divide by CLK_TCK, don't multiply
 7. statm field 2 is RSS
 8. `"0" != 0`; payload parsed twice
+9. Normalization was dead code — deadbands + activity gate + rates instead
 
 ## The three-sentence architecture
 > "Probe (C++) reads procfs every 500ms, diffs CPU against a cached sample, runs sliding-window similarity on {CPU, mem, disk} features, publishes JSON over ZMQ. Auditor (Python) subscribes, adds semantic checks, writes everything to SQLite. Controller (Textual TUI) subscribes for live view, reads SQLite for history, sends POSIX signals to intervene."
@@ -652,7 +683,7 @@ adaptive norm = (value − observed_min) / (observed_max − observed_min)
 | **Infinite loop** | When a program repeats the same work forever with no exit — the computing equivalent of walking in circles. |
 | **Sliding window** | A "last N items only" memory — like a whiteboard that keeps only the 15 most recent readings. |
 | **Circular buffer** | A fixed-size array where new items overwrite the oldest — a whiteboard you erase-rewrite in order. |
-| **Normalization** | Rescaling different units (%, MB, KB) onto a common 0–1 ruler so they can be compared fairly. |
+| **Normalization** | Rescaling different units (%, MB, KB) onto a common ruler so they can be compared fairly. This project's lesson: the *attempted* fix normalized each feature to 0–1 by fixed caps (wrong: crushed light processes) and then by observed ranges (also wrong: amplified noise, and never wired in). The shipped design scales each dimension's *difference* by a fixed noise floor (a "deadband") instead — comparable without amplifying anything. |
 | **Euclidean distance** | Straight-line distance between two points — the everyday notion of "how far apart." |
 | **Exponential decay** | A curve that falls off fast and then levels out — used to turn "distance" into "similarity" between 0 and 1. |
 | **ptrace** | A Linux debugging interface that lets one process say "stop after every OS call" to another — how debuggers work. |
@@ -681,7 +712,7 @@ adaptive norm = (value − observed_min) / (observed_max − observed_min)
 1. **Lead with the problem, not the tech.** "AI agents get stuck in loops" in 5 seconds beats 5 minutes of component inventory.
 2. **Have the ptrace story polished.** It's your strongest "real systems engineering" evidence.
 3. **Never claim the unimplemented.** The old README's ML claims are gone for a reason; if an interviewer finds stale docs, the answer is "that was aspiration, not implementation — I removed it."
-4. **Numbers, numbers, numbers.** 500ms, 15-sample window, 0.8 threshold, 5 matches, 30s heartbeat, ~200-byte messages. Specificity reads as ownership.
+4. **Numbers, numbers, numbers.** 500ms samples, 15-window, 0.8 threshold ⇔ 0.223 deadband units, 5 matches on 2 consecutive samples, 5%/4MB/512KB deadbands, alert cadence 7, 30s heartbeat, ~200-byte messages. Specificity reads as ownership — and do the kernel math live if asked ("exp of minus distance in deadband units; identical → 1.0; 6% CPU alone → 0.30").
 5. **Every limitation with a mitigation.** That's the difference between junior and senior in one sentence.
 
 

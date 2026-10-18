@@ -13,12 +13,7 @@ LoopDetector::LoopDetector(size_t window_size, double similarity_threshold,
     : window_size_(window_size), similarity_threshold_(similarity_threshold),
       min_matches_for_alert_(min_matches_for_alert),
       feature_window_(), match_flags_(), pos_(0),
-      loop_detected_(false), confidence_(0.0), loop_details_(""),
-      cpu_max_(100.0), memory_max_(8192.0), disk_io_max_(102400.0),
-      cpu_min_observed_(100.0), cpu_max_observed_(0.0),
-      mem_min_observed_(8192.0), mem_max_observed_(0.0),
-      disk_min_observed_(102400.0), disk_max_observed_(0.0),
-      samples_collected_(0) {
+      loop_detected_(false), confidence_(0.0), loop_details_("") {
     // Initialize with empty window
     feature_window_.resize(window_size_);
     match_flags_.resize(window_size_, false);
@@ -39,85 +34,39 @@ double LoopDetector::calculateSimilarity(const ProcessFeatures& f1, const Proces
         return 0.0;
     }
     
-    // Calculate Euclidean distance in normalized space
-    double cpu_diff = f1.cpu_usage - f2.cpu_usage;
-    double mem_diff = f1.memory_mb - f2.memory_mb;
-    double disk_read_diff = f1.disk_read_kb - f2.disk_read_kb;
-    double disk_write_diff = f1.disk_write_kb - f2.disk_write_kb;
+    // Distance is measured in per-dimension deadband units: each feature's
+    // difference is divided by a noise floor representing the smallest
+    // change in that resource that is behaviorally meaningful.
+    // (Disk features are per-sample rates, not cumulative counters.)
+    constexpr double kCpuDeadband = 5.0;     // percent
+    constexpr double kMemDeadband = 4.0;     // MB
+    constexpr double kDiskDeadband = 512.0;   // KB per sample (~1 MB/s)
+    
+    double cpu_d = (f1.cpu_usage - f2.cpu_usage) / kCpuDeadband;
+    double mem_d = (f1.memory_mb - f2.memory_mb) / kMemDeadband;
+    double disk_read_d = (f1.disk_read_kb - f2.disk_read_kb) / kDiskDeadband;
+    double disk_write_d = (f1.disk_write_kb - f2.disk_write_kb) / kDiskDeadband;
     
     double distance = std::sqrt(
-        cpu_diff * cpu_diff +
-        mem_diff * mem_diff +
-        disk_read_diff * disk_read_diff +
-        disk_write_diff * disk_write_diff
+        cpu_d * cpu_d +
+        mem_d * mem_d +
+        disk_read_d * disk_read_d +
+        disk_write_d * disk_write_d
     );
     
-    // Convert distance to similarity (0 = identical, larger = more different)
-    // We'll use a simple exponential decay: similarity = exp(-distance / scale)
-    // Scale factor determines how quickly similarity drops with distance
-    double scale = 10.0; // Adjust based on expected variation
-    double similarity = std::exp(-distance / scale);
+    // Similarity = exp(-distance), with distance in deadband units (scale 1).
+    // Threshold 0.8 <=> distance <= ~0.22: all dimensions within ~22% of
+    // one deadband. Identical samples score 1.0; a 6% CPU move alone scores
+    // ~0.30. The threshold is reachable from both sides.
+    double similarity = std::exp(-distance);
     
     return similarity;
 }
 
-ProcessFeatures LoopDetector::normalizeFeatures(const ProcessFeatures& features) const {
-    ProcessFeatures normalized = features;
-    
-    // Adaptive normalization: use observed min/max if we have enough samples
-    // Otherwise fall back to fixed maximums
-    double cpu_max = cpu_max_;
-    double cpu_min = 0.0;
-    double mem_max = memory_max_;
-    double mem_min = 0.0;
-    double disk_max = disk_io_max_;
-    double disk_min = 0.0;
-    
-    if (samples_collected_ >= 10) {
-        // Use observed ranges with some padding
-        cpu_max = std::max(cpu_max_observed_, cpu_max_ * 0.1);
-        cpu_min = cpu_min_observed_;
-        mem_max = std::max(mem_max_observed_, memory_max_ * 0.01);
-        mem_min = mem_min_observed_;
-        disk_max = std::max(disk_max_observed_, disk_io_max_ * 0.01);
-        disk_min = disk_min_observed_;
-    }
-    
-    // Normalize to 0-1 range based on observed or expected ranges
-    if (cpu_max > cpu_min) {
-        normalized.cpu_usage = std::min(1.0, std::max(0.0, (features.cpu_usage - cpu_min) / (cpu_max - cpu_min)));
-    } else {
-        normalized.cpu_usage = 0.0;
-    }
-    
-    if (mem_max > mem_min) {
-        normalized.memory_mb = std::min(1.0, std::max(0.0, (features.memory_mb - mem_min) / (mem_max - mem_min)));
-    } else {
-        normalized.memory_mb = 0.0;
-    }
-    
-    if (disk_max > disk_min) {
-        normalized.disk_read_kb = std::min(1.0, std::max(0.0, (features.disk_read_kb - disk_min) / (disk_max - disk_min)));
-        normalized.disk_write_kb = std::min(1.0, std::max(0.0, (features.disk_write_kb - disk_min) / (disk_max - disk_min)));
-    } else {
-        normalized.disk_read_kb = 0.0;
-        normalized.disk_write_kb = 0.0;
-    }
-    
-    return normalized;
-}
-
 void LoopDetector::addFeatureSample(const ProcessFeatures& features) {
-    // Update observed min/max for adaptive normalization
-    cpu_min_observed_ = std::min(cpu_min_observed_, features.cpu_usage);
-    cpu_max_observed_ = std::max(cpu_max_observed_, features.cpu_usage);
-    mem_min_observed_ = std::min(mem_min_observed_, features.memory_mb);
-    mem_max_observed_ = std::max(mem_max_observed_, features.memory_mb);
-    disk_min_observed_ = std::min(disk_min_observed_, std::min(features.disk_read_kb, features.disk_write_kb));
-    disk_max_observed_ = std::max(disk_max_observed_, std::max(features.disk_read_kb, features.disk_write_kb));
-    samples_collected_++;
-    
-    // Shift window: remove oldest, add newest
+    // A loop alert is only meaningful if the process is actually consuming
+    // resources: an idle process matching itself is not a harmful loop.
+    constexpr double kActivityCpuFloor = 5.0;  // avg CPU% over the window
     
     // Store the sample
     feature_window_[pos_] = features;
@@ -125,13 +74,27 @@ void LoopDetector::addFeatureSample(const ProcessFeatures& features) {
     // Reset match flags for this position
     match_flags_[pos_] = false;
     
-    // Check for similarity with previous samples in window
+    // Check for similarity with previous samples in window,
+    // while accumulating window activity statistics
     size_t matches = 0;
     double total_similarity = 0.0;
     
+    size_t valid_samples = 0;
+    double cpu_sum = 0.0;
+    double disk_total = features.disk_read_kb + features.disk_write_kb;
+    double disk_max = disk_total;
+    
     for (size_t i = 0; i < window_size_; i++) {
-        // Skip self-comparison and empty slots
-        if (i != pos_ && feature_window_[i].timestamp >= 0) {
+        if (feature_window_[i].timestamp < 0) {
+            continue;  // Empty slot
+        }
+        
+        valid_samples++;
+        cpu_sum += feature_window_[i].cpu_usage;
+        double sample_disk_total = feature_window_[i].disk_read_kb + feature_window_[i].disk_write_kb;
+        disk_max = std::max(disk_max, sample_disk_total);
+        
+        if (i != pos_) {
             double similarity = calculateSimilarity(feature_window_[i], features);
             
             if (similarity >= similarity_threshold_) {
@@ -147,10 +110,23 @@ void LoopDetector::addFeatureSample(const ProcessFeatures& features) {
         match_flags_[pos_] = true;
     }
     
+    // Activity gate: window must show real resource consumption.
+    // Disk features are rates, so any nonzero rate in the window counts.
+    bool active = false;
+    if (valid_samples > 0) {
+        double avg_cpu = cpu_sum / static_cast<double>(valid_samples);
+        active = (avg_cpu >= kActivityCpuFloor) || (disk_max > 0.0);
+    }
+    
     // Determine if we have a loop
     // Require a higher threshold of matches to reduce false positives
     size_t required_matches = std::max(min_matches_for_alert_, window_size_ / 3);
-    loop_detected_ = (matches >= required_matches);
+    
+    // Consecutive-evidence confirmation: alert only when the current
+    // sample AND the previous sample both carried sufficient matches.
+    bool evidence = active && (matches >= required_matches);
+    loop_detected_ = evidence && prev_evidence_;
+    prev_evidence_ = evidence;
     
     if (loop_detected_) {
         // Calculate average similarity for confidence
@@ -185,23 +161,15 @@ std::string LoopDetector::getLoopDetails() const {
 }
 
 void LoopDetector::reset() {
-    // Clear the window
+    // Clear the evidence window
     for (auto& features : feature_window_) {
         features.timestamp = -1;
     }
     std::fill(match_flags_.begin(), match_flags_.end(), false);
-    
-    // Reset adaptive normalization state
-    cpu_min_observed_ = 100.0;
-    cpu_max_observed_ = 0.0;
-    mem_min_observed_ = 8192.0;
-    mem_max_observed_ = 0.0;
-    disk_min_observed_ = 102400.0;
-    disk_max_observed_ = 0.0;
-    samples_collected_ = 0;
     pos_ = 0;
     
     loop_detected_ = false;
+    prev_evidence_ = false;
     confidence_ = 0.0;
     loop_details_ = "Detector reset";
 }

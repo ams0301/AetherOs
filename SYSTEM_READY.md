@@ -15,7 +15,7 @@ After comprehensive development and enhancement, the Aether-OS system is now **F
   - Works without elevated privileges (monitor-only mode when needed)
 
 ### 🧠 INTELLIGENT DETECTION
-- Multi-dimensional loop detection with exponential decay similarity and adaptive normalization
+- Multi-dimensional loop detection with exponential decay similarity in per-dimension deadband units, gated on real resource activity and confirmed on consecutive samples
 - Syntactic loop detection (repeated command sequences) and semantic analysis (repeated error patterns)
 - Pattern recognition for inefficient resource usage
 - Real-time trend analysis and deviation detection

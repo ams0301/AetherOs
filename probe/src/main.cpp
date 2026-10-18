@@ -59,17 +59,24 @@ int main(int argc, char* argv[]) {
     size_t sample_count = 0;
     auto last_heartbeat = std::chrono::steady_clock::now();
     const auto heartbeat_interval = std::chrono::seconds(30); // Send heartbeat every 30 seconds
-    
+    long prev_disk_read = -1, prev_disk_write = -1; // For per-sample I/O rates
+
     while (running) {
         // Get process information
         aetheros::probe::ProcessInfo info = process_monitor.getProcessInfo(target_pid);
-        
-        // Create feature sample for loop detection
+
+        // Create feature sample for loop detection.
+        // Disk features are per-sample RATES (delta of cumulative counters),
+        // not cumulative totals -- a constant-rate I/O loop must look flat.
         aetheros::probe::ProcessFeatures features;
         features.cpu_usage = info.cpu_usage;
         features.memory_mb = static_cast<double>(info.memory_usage) / 1024.0; // Convert KB to MB
-        features.disk_read_kb = static_cast<double>(info.disk_read);
-        features.disk_write_kb = static_cast<double>(info.disk_write);
+        features.disk_read_kb = (prev_disk_read < 0) ? 0.0 :
+            static_cast<double>(std::max(0L, info.disk_read - prev_disk_read));
+        features.disk_write_kb = (prev_disk_write < 0) ? 0.0 :
+            static_cast<double>(std::max(0L, info.disk_write - prev_disk_write));
+        prev_disk_read = info.disk_read;
+        prev_disk_write = info.disk_write;
         features.timestamp = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count();

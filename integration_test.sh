@@ -1,32 +1,43 @@
 #!/bin/bash
-cd /mnt/c/Users/PC/Documents/Default\ Project/AetherOS
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 rm -f auditor/aetheros_audit.db
 
-# Start auditor in ZMQ mode
 cd auditor
-timeout 25 python3 auditor.py --zmq --db-path ./aetheros_audit.db &
+timeout 30 python3 auditor.py --zmq --db-path ./aetheros_audit.db > /tmp/auditor_e2e.log 2>&1 &
 AUDITOR_PID=$!
-echo "Auditor PID: $AUDITOR_PID"
 sleep 3
 
-# Run probe monitoring self (bash process)
-cd ../probe/build
-timeout 15 ./aetheros-probe $$
+cd "$SCRIPT_DIR/probe/build"
+gcc -std=c11 -O2 "$SCRIPT_DIR/probe/tests/spin_target.c" -o /tmp/aetheros_spin
+/tmp/aetheros_spin &
+BURNER_PID=$!
+echo "CPU spinner PID: $BURNER_PID"
+sleep 1
 
-sleep 2
-kill $AUDITOR_PID 2>/dev/null
+cd "$SCRIPT_DIR/probe/build"
+timeout 12 ./aetheros-probe $BURNER_PID 2>&1 | grep -E "LOOP DETECTED|Samples:" | head -12
 
-echo "=== Checking audit database ==="
-cd ../../
-python3 test_db_init.py
-python3 -c "
+kill $BURNER_PID $AUDITOR_PID 2>/dev/null
+wait $BURNER_PID $AUDITOR_PID 2>/dev/null
+
+echo "=== Audit database after run ==="
+cd "$SCRIPT_DIR"
+python3 - <<'EOF'
 import sys
 sys.path.insert(0, 'auditor')
 sys.path.insert(0, 'controller/src')
 from audit.viewer import AuditViewer
 v = AuditViewer('./auditor/aetheros_audit.db')
-print('Process metrics:', len(v.get_process_metrics(limit=100)))
-print('Alerts:', len(v.get_alerts(limit=100)))
-print('Loop detections:', len(v.get_loop_detections(limit=100)))
-print('System events:', len(v.get_system_events(limit=100)))
-"
+metrics = len(v.get_process_metrics(limit=1000))
+alerts = len(v.get_alerts(limit=1000))
+loops = len(v.get_loop_detections(limit=1000))
+print(f"process_metrics rows: {metrics}")
+print(f"alerts rows:          {alerts}")
+print(f"loop_detections rows: {loops}")
+if metrics > 0 and loops > 0:
+    print("E2E PASS: metrics flowed and active loop detected + persisted")
+    sys.exit(0)
+print("E2E FAIL")
+sys.exit(1)
+EOF

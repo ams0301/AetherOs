@@ -49,7 +49,7 @@ Aether-OS provides comprehensive monitoring, analysis, and control capabilities 
 - Multi-process tracking including child processes
 
 ###  **Intelligent Detection**
-- **Reasoning Loop Detection**: Multi-dimensional similarity analysis with adaptive per-process normalization and exponential-decay similarity
+- **Reasoning Loop Detection**: Multi-dimensional similarity analysis in per-dimension noise-floor units (deadbands), with an activity gate and consecutive-sample confirmation
 - **Syntactic Loop Detection**: Repeated command-sequence detection over a sliding window
 - **Semantic Analysis**: Regex-based error pattern recognition and repeated error-signature detection
 - **Pattern Recognition**: Identifies inefficient resource usage patterns
@@ -109,12 +109,13 @@ Aether-OS provides comprehensive monitoring, analysis, and control capabilities 
 
 ###  **Reasoning Loop Interceptor**
 Instead of simple hash matching, Aether-OS uses multi-dimensional feature analysis:
-- **Features Monitored**: CPU usage, memory consumption, disk I/O patterns
-- **Similarity Measure**: Exponential decay based on Euclidean distance in normalized feature space
-- **Adaptive Normalization**: Features are normalized against each process's *own* observed min/max range (after a 10-sample warm-up), so light workloads don't produce false positives from fixed absolute caps
-- **Detection Logic**: Requires `max(min_matches, window_size/3)` similar samples within the sliding window to confirm a loop
+- **Features Monitored**: CPU usage, memory consumption, per-sample disk I/O rates
+- **Similarity Measure**: `exp(-distance)`, where distance is Euclidean in per-dimension *deadband units* (CPU 5%, memory 4MB, disk rate 512KB) — identical samples score 1.0, a 6% CPU move alone scores ~0.30, so the 0.8 threshold is reachable and discriminating
+- **Activity Gate**: Alerts require the window to show real resource consumption (avg CPU ≥ 5% or any I/O) — an idle process matching itself is not a harmful loop
+- **Detection Logic**: Requires `max(min_matches, window_size/3)` similar samples, confirmed on **two consecutive samples** (random near-duplicate spikes are independent; real loops persist)
 - **Confidence Scoring**: Based on average similarity of detected matches
 - **Configurable Sensitivity**: Window size, similarity threshold, and match count are all tunable
+- **Verified**: 12-case adversarial test harness (`probe/tests/test_loop_detector.cpp`) covering spins, jitter, periodic patterns, drift, I/O loops, and the randomized-workload false-positive repro
 
 ###  **Multi-Layer Detection**
 The Auditor applies defense in depth with two orthogonal detection layers:
@@ -346,12 +347,20 @@ What has actually been verified, and how:
 
 ## Release Notes
 
-### v1.1.0 (Current)
+### v1.1.1 (Current)
+- **Loop detector threshold math fixed**: a whiteboard check exposed that the documented normalization was never wired into the similarity path (dead code) and that the threshold, as described, could never reject anything. Similarity now runs in per-dimension *deadband units* (CPU 5% / memory 4MB / disk rate 512KB) with `exp(-distance)` — reachable and discriminating
+- **I/O rates, not cumulative counters**: the detector's disk features are per-sample deltas; constant-rate I/O loops are now detectable (cumulative counters made them structurally impossible to match)
+- **Activity gate**: alerts require real resource consumption (avg CPU ≥ 5% or any I/O) — idle processes no longer self-match into alerts
+- **Consecutive-sample confirmation**: detection requires full evidence on two consecutive samples (Poisson spikes are independent; loops persist)
+- **Adversarial test harness**: `probe/tests/test_loop_detector.cpp` — 12 labeled cases (spins, jitter, periodic patterns, drift, I/O loops, and the randomized-workload false-positive repro), all passing; end-to-end verified against a CPU-pinned spinner at the derived alert cadence (samples 7, 14, 21)
+- **Docs**: INTERVIEW_GUIDE updated with the honest post-mortem (bug #9) and corrected algorithm/math
+
+### v1.1.0
 - **Build fix**: ZMQ socket option corrected (`sndhwm`), builds cleanly against standard cppzmq
 - **Ptrace fix**: cross-thread violation eliminated — the interceptor thread now owns the entire tracee lifecycle (no more false `ESRCH`)
 - **CPU metrics fix**: process cache is now populated; CPU% computes real values; formula is portable across tick rates (`sysconf(_SC_CLK_TCK)` as a divisor)
 - **Memory fix**: reads RSS (`statm` field 2) instead of VSZ (field 1)
-- **Loop detector**: adaptive per-process normalization + higher match threshold (`max(min_matches, window/3)`) — false positives on light workloads eliminated; function-local static buffer index converted to a member (multi-instance safe)
+- **Loop detector**: higher match threshold (`max(min_matches, window/3)`); function-local static buffer index converted to a member (multi-instance safe)
 - **Auditor**: wired to the Probe's live ZMQ stream (`--zmq` mode) with a full SQLite write path (`process_metrics`, `alerts`, `loop_detections`, `system_events`)
 - **Hygiene**: removed junk files and unused ML dependencies; removed the placeholder core-dump from snapshots and documented the real restoration boundary (gdb/CRIU)
 - **Docs**: added `INTERVIEW_GUIDE.md` (deep-dive + Q&A bank); README scrubbed of unimplemented claims

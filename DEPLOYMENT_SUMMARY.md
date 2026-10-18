@@ -13,7 +13,7 @@ After comprehensive enhancement, the Aether-OS system now delivers **all origina
 - Low-latency ZMQ communication between components
 
 ### 2. **INTELLIGENT DETECTION** (Enhanced)
-- **Reasoning Loop Detection**: Multi-dimensional similarity analysis with exponential decay and adaptive normalization
+- **Reasoning Loop Detection**: Multi-dimensional similarity analysis with exponential decay in deadband units, activity-gated and consecutive-confirmed
 - **Multi-Layer Detection**: Syntactic (repeated command sequences) plus semantic (repeated error patterns)
 - **Pattern Recognition**: Identifies inefficient resource usage patterns
 - **Statistical Analysis**: Real-time trend analysis and deviation detection
